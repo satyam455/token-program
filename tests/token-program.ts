@@ -1,86 +1,115 @@
 import * as anchor from "@coral-xyz/anchor";
-import { Program } from "@coral-xyz/anchor";
-import { PublicKey, SystemProgram } from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID, getAccount, getAssociatedTokenAddress } from "@solana/spl-token";
-import { expect } from "chai";
-const { BN, Program } = anchor;
+import * as web3 from "@solana/web3.js";
+import assert from "assert";
+import BN from "bn.js";
+import { Spl } from "../target/types/spl";
 
 describe("spl program test", () => {
-  // Configure the client to use the local cluster
-  const provider = anchor.AnchorProvider.local();
-  anchor.setProvider(provider);
-  const wallet = provider.wallet as anchor.Wallet;
-  const program = anchor.workspace.Spl as Program; // 👈 matches your #[program] name: `mod spl`
+  // Configure the client to use the local cluster.
+  anchor.setProvider(anchor.AnchorProvider.env());
 
-  let mintPda: PublicKey;
-  let metadataPda: PublicKey;
-  let bump: number;
+  const program = anchor.workspace.Spl as anchor.Program<Spl>;
 
+  const METADATA_SEED = "metadata";
+  const TOKEN_METADATA_PROGRAM_ID = new web3.PublicKey(
+    "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+  );
+
+  const MINT_SEED = "mint";
+  const payer = program.provider.publicKey;
   const metadata = {
-    name: "MyToken",
-    symbol: "MTK",
-    uri: "https://example.com/metadata.json",
-    decimals: 9,
-  };
+    name: "Net2Dev SPL Rewards Token",
+    symbol: "N2DR",
+    uri: "https://arweave.net/Xjqaj_rYYQGrsiTk9JRqpguA813w6NGPikcRyA1vAHM",
+    decimals: 9
+  }
+  const mintAmount = 10;
 
-  it("Initialize token mint with metadata", async () => {
-    // Derive PDA for mint
-    [mintPda, bump] = await PublicKey.findProgramAddressSync(
-      [Buffer.from("mint")],
-      program.programId
-    );
+  const [mint] = web3.PublicKey.findProgramAddressSync(
+    [Buffer.from(MINT_SEED)],
+    program.programId
+  );
 
-    // Derive PDA for metadata (Metaplex metadata account)
-    const tokenMetadataProgramId = new PublicKey(
-      "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s" // metaplex metadata program id
-    );
-    [metadataPda] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("metadata"),
-        tokenMetadataProgramId.toBuffer(),
-        mintPda.toBuffer(),
-      ],
-      tokenMetadataProgramId
-    );
+  const [metadataAddress] = web3.PublicKey.findProgramAddressSync(
+    [
+      Buffer.from(METADATA_SEED),
+      TOKEN_METADATA_PROGRAM_ID.toBuffer(),
+      mint.toBuffer(),
+    ],
+    TOKEN_METADATA_PROGRAM_ID
+  );
 
-    await program.methods
+  it("Initialize", async () => {
+    const info = await program.provider.connection.getAccountInfo(mint);
+    if (info) {
+      return; // Do not attempt to initialize if already initialized
+    }
+    console.log("  Mint not found. Initializing Program...");
+
+    const context = {
+      metadata: metadataAddress,
+      mint,
+      payer,
+      rent: web3.SYSVAR_RENT_PUBKEY,
+      systemProgram: web3.SystemProgram.programId,
+      tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+      tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
+    };
+
+
+    const txHash = await program.methods
       .initiateToken(metadata)
-      .accounts({
-        metadata: metadataPda,
-        mint: mintPda,
-        payer: wallet.publicKey,
-        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-        systemProgram: SystemProgram.programId,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        tokenMetadataProgram: tokenMetadataProgramId,
-      })
-      .signers([])
+      .accounts(context)
       .rpc();
 
-    console.log("✅ Token initialized with mint:", mintPda.toBase58());
+    await program.provider.connection.confirmTransaction(txHash, "finalized");
+    console.log(`  https://explorer.solana.com/tx/${txHash}?cluster=devnet`);
+    const newInfo = await program.provider.connection.getAccountInfo(mint);
+    assert(newInfo, "  Mint should be initialized.");
   });
 
-  it("Mints tokens to user ATA", async () => {
-    const ata = await getAssociatedTokenAddress(mintPda, wallet.publicKey);
+  it("mint tokens", async () => {
+    const destination = await anchor.utils.token.associatedAddress({
+      mint: mint,
+      owner: payer,
+    });
 
-    await program.methods
-      .mintTokens(new BN(1000)
+    let initialBalance: number;
 
-      ) // mint 100 tokens (if 9 decimals)
-      .accounts({
-        mint: mintPda,
-        destination: ata,
-        payer: wallet.publicKey,
-        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-        systemProgram: SystemProgram.programId,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: anchor.utils.token.ASSOCIATED_PROGRAM_ID,
-      })
-      .signers([])
+    try {
+      const balance = await program.provider.connection.getTokenAccountBalance(destination);
+      initialBalance = balance.value.uiAmount;
+    } catch {
+      // Token account not yet initiated has 0 balance
+      initialBalance = 0;
+    }
+
+    const context = {
+      mint,
+      destination,
+      payer,
+      rent: web3.SYSVAR_RENT_PUBKEY,
+      systemProgram: web3.SystemProgram.programId,
+      tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+      associatedTokenProgram: anchor.utils.token.ASSOCIATED_PROGRAM_ID,
+    };
+
+    const txHash = await program.methods
+      .mintTokens(new BN(mintAmount * 10 ** metadata.decimals))
+      .accounts(context)
       .rpc();
+    await program.provider.connection.confirmTransaction(txHash);
+    console.log(`  https://explorer.solana.com/tx/${txHash}?cluster=devnet`);
 
-    const accountInfo = await getAccount(provider.connection, ata);
-    expect(Number(accountInfo.amount)).to.equal(100_000_000_000);
-    console.log("✅ Minted tokens to:", ata.toBase58());
+    const postBalance = (
+      await program.provider.connection.getTokenAccountBalance(destination)
+    ).value.uiAmount;
+    assert.equal(
+      initialBalance + mintAmount,
+      postBalance,
+      "Compare balances, it must be equal"
+    );
   });
 });
+
+

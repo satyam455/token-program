@@ -7,15 +7,18 @@ anchor_version = "0.32.1"
 resolution = true
 skip-lint = false
 
-[programs.localnet]
+[programs.devnet]
 token_program = "9S6ZX5mY7TeXxMy4sHJKWQPa6eZMZXiR8zHuJgtBwxVm"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
+
+[test]
+startup_wait = 3000
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
